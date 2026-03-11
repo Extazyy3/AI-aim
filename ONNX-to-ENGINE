@@ -1,0 +1,69 @@
+import tensorrt as trt
+import json
+import struct
+ 
+def convert_onnx_to_trt(onnx_path, engine_path, metadata):
+    logger = trt.Logger(trt.Logger.INFO)
+    builder = trt.Builder(logger)
+ 
+    # TensorRT 10 requires EXPLICIT_BATCH
+    flag = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    network = builder.create_network(flag)
+ 
+    parser = trt.OnnxParser(network, logger)
+    if not parser.parse_from_file(onnx_path):
+        print(f"Failed to load ONNX file: {onnx_path}")
+        for error in range(parser.num_errors):
+            print(parser.get_error(error))
+        return
+ 
+    config = builder.create_builder_config()
+ 
+    # TensorRT 10 API for workspace size
+    workspace_size = 4 * (1 << 30)  # 4 GB
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_size)
+ 
+    # Optional: Set FP16 if needed
+    if builder.platform_has_fast_fp16:
+        config.set_flag(trt.BuilderFlag.FP16)
+ 
+    print("Building serialized network...")
+    # TensorRT 10 specific API: build_serialized_network instead of build_engine
+    serialized_engine = builder.build_serialized_network(network, config)
+ 
+    if serialized_engine is None:
+        print("Failed to build engine.")
+        return
+ 
+    print("Saving engine with Ultralytics metadata...")
+    with open(engine_path, "wb") as f:
+        # 1. Ultralytics embeds metadata by writing the length of the JSON string (4 bytes, little-endian)
+        # followed by the JSON string itself, BEFORE the actual TensorRT engine.
+        meta_json = json.dumps(metadata)
+        # Write length as 4-byte little endian signed integer
+        f.write(len(meta_json).to_bytes(4, byteorder="little", signed=True))
+        # Write metadata string
+        f.write(meta_json.encode())
+ 
+        # 2. Write the serialized engine
+        f.write(serialized_engine)
+ 
+    print("DONE")
+ 
+if __name__ == "__main__":
+    # Ensure this matches your model! 
+    # Output shape 1,5,8400 implies 1 class (4 bbox coords + 1 class score = 5)
+    meta = {
+        "description": "Ultralytics YOLOv8 model",
+        "author": "Ultralytics",
+        "license": "AGPL-3.0 https://ultralytics.com/license",
+        "version": "8.3.0",
+        "task": "detect",
+        "batch": 1,
+        "imgsz": [640, 640],
+        "stride": 32,
+        "names": {0: "class0"}  # Update string label to your actual class names
+    }
+ 
+    convert_onnx_to_trt("best.onnx", "best.engine", meta)
+ 
